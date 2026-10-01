@@ -1,0 +1,214 @@
+// Marketing Revenue Attribution Dashboard — data model
+//
+// Runs on PostgreSQL (Neon) so the app can be hosted on Vercel's serverless
+// platform, which has no persistent filesystem (SQLite is not viable there).
+// The models are portable — no DB-specific types, no enums/arrays.
+//
+// The schema models the spend -> engagement -> leads/pipeline -> revenue chain:
+//
+//   Google/Meta Ads  ->  GA4        ->  HubSpot              ->  Stripe
+//   (SpendDaily)         (TrafficDaily) (Lead, Deal)            (Payment)
+//
+// Attribution note: in a live build, campaignId/locationId on Lead/Deal/Payment
+// are *derived* by joining UTM + gclid/fbclid captured on the lead form to the
+// HubSpot contact, then matching Stripe customers to HubSpot contacts by email.
+// In this demo the seed sets them as ground truth so the UI is fully populated.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Excerpt: only the models used by src/lib/import/ingest.ts. The full schema
+// (auth, audit, AI runs) lives in the private Revora repository.
+
+model Location {
+  id        String  @id @default(cuid())
+  dataset   String  @default("sample")
+  ownerId   String  @default("sample") // tenant: userId, or "sample"
+  name      String
+  city      String
+  state     String
+
+  campaigns Campaign[]
+  leads     Lead[]
+  deals     Deal[]
+  payments  Payment[]
+
+  @@unique([ownerId, dataset, name])
+  @@index([dataset])
+  @@index([ownerId])
+}
+model Campaign {
+  id         String   @id @default(cuid())
+  dataset    String   @default("sample")
+  ownerId    String   @default("sample") // tenant: userId, or "sample"
+  externalId String // id/name from the source (used for upserts)
+  name       String
+  channel    String // "google" | "meta" | "other"
+  service    String // e.g. "Water Damage", "Mold Remediation"
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+
+  spend   SpendDaily[]
+  traffic TrafficDaily[]
+  leads   Lead[]
+  deals   Deal[]
+  payments Payment[]
+
+  @@unique([ownerId, dataset, externalId])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([channel])
+  @@index([locationId])
+}
+model SpendDaily {
+  id          String   @id @default(cuid())
+  dataset     String   @default("sample")
+  ownerId     String   @default("sample") // tenant: userId, or "sample"
+  date        DateTime
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+  impressions Int
+  clicks      Int
+  cost        Float
+
+  @@unique([campaignId, date])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([date])
+}
+model TrafficDaily {
+  id          String   @id @default(cuid())
+  dataset     String   @default("sample")
+  ownerId     String   @default("sample") // tenant: userId, or "sample"
+  date        DateTime
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+  sessions    Int
+  engaged     Int
+  conversions Int // GA4-reported conversions (web form/click-to-call)
+
+  @@unique([campaignId, date])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([date])
+}
+model Lead {
+  id         String   @id @default(cuid())
+  dataset    String   @default("sample")
+  ownerId    String   @default("sample") // tenant: userId, or "sample"
+  extKey     String // natural key for upsert (record id, or email|date)
+  createdAt  DateTime
+  email      String
+  firstName  String
+  lastName   String
+  status     String
+  // attribution captured on form submit
+  utmSource   String
+  utmMedium   String
+  utmCampaign String
+  gclid       String?
+  fbclid      String?
+  channel     String // "google" | "meta" | "other"
+  locationId  String
+  location    Location @relation(fields: [locationId], references: [id])
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+
+  deal Deal?
+
+  @@unique([ownerId, dataset, extKey])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([email])
+  @@index([createdAt])
+  @@index([channel])
+  @@index([locationId])
+}
+model Deal {
+  id         String    @id @default(cuid())
+  dataset    String    @default("sample")
+  ownerId    String    @default("sample") // tenant: userId, or "sample"
+  extKey     String // natural key for upsert
+  createdAt  DateTime
+  closedAt   DateTime?
+  stage      String
+  amount     Float // deal value (booked job estimate)
+  email      String
+  channel    String
+  locationId String
+  location   Location  @relation(fields: [locationId], references: [id])
+  campaignId String
+  campaign   Campaign  @relation(fields: [campaignId], references: [id])
+  leadId     String?   @unique
+  lead       Lead?     @relation(fields: [leadId], references: [id])
+
+  payment Payment?
+
+  @@unique([ownerId, dataset, extKey])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([createdAt])
+  @@index([stage])
+  @@index([channel])
+  @@index([locationId])
+}
+model SearchConsoleDaily {
+  id          String   @id @default(cuid())
+  dataset     String   @default("sample")
+  ownerId     String   @default("sample") // tenant: userId, or "sample"
+  date        DateTime
+  clicks      Int
+  impressions Int
+  ctr         Float
+  position    Float
+
+  @@unique([ownerId, dataset, date])
+  @@index([dataset])
+  @@index([ownerId])
+}
+model SearchQuery {
+  id          String @id @default(cuid())
+  dataset     String @default("sample")
+  ownerId     String @default("sample") // tenant: userId, or "sample"
+  query       String
+  clicks      Int
+  impressions Int
+  ctr         Float
+  position    Float
+
+  @@unique([ownerId, dataset, query])
+  @@index([dataset])
+  @@index([ownerId])
+}
+model Payment {
+  id         String   @id @default(cuid())
+  dataset    String   @default("sample")
+  ownerId    String   @default("sample") // tenant: userId, or "sample"
+  extKey     String // natural key for upsert (Stripe payment id, or email|date|amount)
+  createdAt  DateTime
+  amount     Float
+  refunded   Float    @default(0) // amount refunded, if any
+  type       String
+  email      String
+  channel    String
+  locationId String
+  location   Location @relation(fields: [locationId], references: [id])
+  campaignId String
+  campaign   Campaign @relation(fields: [campaignId], references: [id])
+  dealId     String?  @unique
+  deal       Deal?    @relation(fields: [dealId], references: [id])
+
+  @@unique([ownerId, dataset, extKey])
+  @@index([dataset])
+  @@index([ownerId])
+  @@index([email])
+  @@index([createdAt])
+  @@index([channel])
+  @@index([locationId])
+}
